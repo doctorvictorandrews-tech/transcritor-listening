@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Transcritor de Áudios | Listening</title>
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#3b5bdb">
+<style>
+  :root {
+    --bg: #f6f7fb; --card: #ffffff; --ink: #1d2433; --muted: #667085;
+    --line: #e3e6ef; --brand: #3b5bdb; --brand-soft: #edf1ff; --ok: #1f9d55; --err: #c92a2a;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.5; }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 32px 18px 60px; }
+  h1 { font-size: 24px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 22px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px; margin-bottom: 16px; }
+  .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  label { font-weight: 600; font-size: 14px; }
+  select { padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 14px; background: #fff; }
+  .hint { color: var(--muted); font-size: 13px; }
+  #drop { border: 2px dashed #b8c2e8; background: var(--brand-soft); border-radius: 14px; padding: 36px 18px;
+    text-align: center; cursor: pointer; transition: .15s; }
+  #drop.over { background: #dfe7ff; border-color: var(--brand); }
+  #drop strong { display: block; font-size: 17px; margin-bottom: 4px; }
+  button { background: var(--brand); color: #fff; border: 0; border-radius: 8px; padding: 8px 14px;
+    font-size: 14px; font-weight: 600; cursor: pointer; }
+  button.ghost { background: #fff; color: var(--brand); border: 1px solid #b8c2e8; }
+  button:disabled { opacity: .5; cursor: default; }
+  .bar { height: 8px; background: var(--line); border-radius: 99px; overflow: hidden; margin-top: 10px; }
+  .bar > i { display: block; height: 100%; width: 0%; background: var(--brand); transition: width .2s; }
+  .status { font-size: 14px; color: var(--muted); margin-top: 8px; min-height: 20px; }
+  .item h3 { margin: 0 0 2px; font-size: 15px; word-break: break-all; }
+  .item .meta { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+  .item textarea { width: 100%; min-height: 110px; border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px; font: inherit; font-size: 15px; resize: vertical; }
+  .tag { font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 99px; background: var(--brand-soft); color: var(--brand); }
+  .tag.ok { background: #e6f6ec; color: var(--ok); }
+  .tag.err { background: #fdecec; color: var(--err); }
+  .privacy { font-size: 13px; color: var(--muted); }
+  #toolbar { display: none; justify-content: space-between; align-items: center; margin: 4px 0 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Transcritor de Áudios</h1>
+  <p class="sub">Arraste os áudios do WhatsApp (.ogg, .opus, .mp3, .m4a, .wav) e receba o texto em português.</p>
+
+  <div class="card">
+    <div class="row">
+      <label for="model">Qualidade</label>
+      <select id="model">
+        <option value="onnx-community/whisper-base">Rápida (base, cerca de 80 MB no primeiro uso)</option>
+        <option value="onnx-community/whisper-small">Mais precisa (small, cerca de 300 MB no primeiro uso)</option>
+      </select>
+    </div>
+    <p class="hint" style="margin:10px 0 0">No primeiro uso o modelo é baixado e fica guardado no navegador. Depois disso abre bem mais rápido.</p>
+  </div>
+
+  <div id="drop">
+    <strong>Solte os áudios aqui</strong>
+    ou clique para escolher os arquivos
+    <input id="file" type="file" accept="audio/*,.ogg,.opus" multiple hidden>
+  </div>
+
+  <div class="card" id="progressCard" style="display:none">
+    <div id="status" class="status"></div>
+    <div class="bar"><i id="barfill"></i></div>
+  </div>
+
+  <div id="toolbar">
+    <span class="hint">Revise o texto antes de usar. Transcrição automática pode errar nomes e gírias.</span>
+    <button class="ghost" id="copyAll">Copiar tudo</button>
+  </div>
+  <div id="results"></div>
+
+  <p class="privacy">Privacidade: o áudio é processado dentro do seu navegador e não é enviado para nenhum servidor. Só o modelo é baixado da internet. Use o Chrome ou o Edge (o Safari pode não abrir arquivos .ogg).</p>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const drop = $('#drop'), fileInput = $('#file'), results = $('#results');
+const status = $('#status'), barfill = $('#barfill'), progressCard = $('#progressCard');
+let tf = null, asr = null, loadedModel = null, queue = Promise.resolve();
+const fileProgress = {};
+
+const CDNS = [
+  'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.6/dist/transformers.min.js',
+  'https://unpkg.com/@huggingface/transformers@3.7.6/dist/transformers.min.js',
+  'https://esm.sh/@huggingface/transformers@3.7.6'
+];
+
+function setStatus(t, pct) {
+  progressCard.style.display = 'block';
+  status.textContent = t;
+  if (pct != null) barfill.style.width = Math.max(0, Math.min(100, pct)) + '%';
+}
+
+const tick = () => new Promise((r) => setTimeout(r, 30));
+
+async function loadLibrary() {
+  if (tf) return;
+  const errs = [];
+  for (const url of CDNS) {
+    try {
+      setStatus('Carregando o motor de transcrição...', 0);
+      tf = await import(url);
+      return;
+    } catch (e) { errs.push(new URL(url).host + ': ' + (e && e.message || e)); }
+  }
+  throw new Error('Não consegui baixar o motor de transcrição. Verifique a internet ou se o computador bloqueia esses sites. Detalhes: ' + errs.join(' | '));
+}
+
+async function loadModel(model) {
+  await loadLibrary();
+  if (asr && loadedModel === model) return;
+  asr = null;
+  tf.env.allowLocalModels = false;
+  for (const k in fileProgress) delete fileProgress[k];
+  setStatus('Baixando o modelo...', 0);
+  asr = await tf.pipeline('automatic-speech-recognition', model, {
+    device: 'wasm',
+    dtype: 'q8',
+    progress_callback: (p) => {
+      if (p.status === 'progress' && p.file) {
+        fileProgress[p.file] = { loaded: p.loaded || 0, total: p.total || 0 };
+        let l = 0, t = 0;
+        for (const k in fileProgress) { l += fileProgress[k].loaded; t += fileProgress[k].total; }
+        if (t) setStatus('Baixando o modelo: ' + Math.round(l / 1048576) + ' de ' + Math.round(t / 1048576) + ' MB', (l / t) * 100);
+      }
+    }
+  });
+  loadedModel = model;
+  setStatus('Modelo pronto.', 100);
+}
+
+async function decode(file) {
+  const buf = await file.arrayBuffer();
+  const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+  try {
+    const audio = await ctx.decodeAudioData(buf);
+    let data;
+    if (audio.numberOfChannels > 1) {
+      const a = audio.getChannelData(0), b = audio.getChannelData(1);
+      data = new Float32Array(a.length);
+      for (let i = 0; i < a.length; i++) data[i] = (a[i] + b[i]) / 2;
+    } else {
+      data = new Float32Array(audio.getChannelData(0));
+    }
+    return { data, seconds: audio.duration };
+  } finally { ctx.close(); }
+}
+
+function addCard(name) {
+  const el = document.createElement('div');
+  el.className = 'card item';
+  el.innerHTML = '<h3></h3><div class="meta"></div><span class="tag">Na fila</span><textarea hidden></textarea>';
+  el.querySelector('h3').textContent = name;
+  results.appendChild(el);
+  $('#toolbar').style.display = 'flex';
+  return el;
+}
+
+function setTag(el, text, cls) {
+  const t = el.querySelector('.tag'); t.textContent = text; t.className = 'tag ' + (cls || '');
+}
+
+async function processFiles(files) {
+  const list = Array.from(files);
+  if (!list.length) return;
+  const cards = list.map((f) => addCard(f.name));
+  queue = queue.then(async () => {
+    try {
+      await loadModel($('#model').value);
+    } catch (err) {
+      const msg = String(err && err.message || err);
+      cards.forEach((c) => setTag(c, 'Erro: ' + msg, 'err'));
+      setStatus('Não foi possível carregar o modelo. ' + msg, 0);
+      return;
+    }
+    for (let i = 0; i < list.length; i++) {
+      const f = list[i], el = cards[i];
+      try {
+        setTag(el, 'Lendo o áudio...');
+        setStatus('Áudio ' + (i + 1) + ' de ' + list.length + ': lendo o arquivo', ((i) / list.length) * 100);
+        const { data, seconds } = await decode(f);
+        el.querySelector('.meta').textContent = 'Duração: ' + Math.round(seconds) + ' s';
+        setTag(el, 'Transcrevendo...');
+        setStatus('Áudio ' + (i + 1) + ' de ' + list.length + ': transcrevendo', ((i + 0.5) / list.length) * 100);
+        await tick();
+        const out = await asr(data, { language: 'portuguese', task: 'transcribe', chunk_length_s: 30, stride_length_s: 5 });
+        const text = (out.text || '').trim();
+        const ta = el.querySelector('textarea');
+        ta.value = text || '(nenhuma fala reconhecida)'; ta.hidden = false;
+        setTag(el, 'Pronto', 'ok');
+      } catch (err) {
+        setTag(el, 'Erro: ' + err.message, 'err');
+      }
+    }
+    setStatus('Concluído. Revise os textos abaixo.', 100);
+  });
+}
+
+drop.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', () => { processFiles(fileInput.files); fileInput.value = ''; });
+['dragenter', 'dragover'].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add('over'); }));
+['dragleave', 'drop'].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', (e) => processFiles(e.dataTransfer.files));
+
+$('#copyAll').addEventListener('click', async () => {
+  const parts = Array.from(results.querySelectorAll('.item')).map((el) => {
+    const ta = el.querySelector('textarea');
+    return ta.hidden ? '' : el.querySelector('h3').textContent + '\n' + ta.value;
+  }).filter(Boolean);
+  try { await navigator.clipboard.writeText(parts.join('\n\n')); $('#copyAll').textContent = 'Copiado'; }
+  catch (e) { $('#copyAll').textContent = 'Selecione e copie manualmente'; }
+  setTimeout(() => { $('#copyAll').textContent = 'Copiar tudo'; }, 1800);
+});
+
+if ('serviceWorker' in navigator && location.protocol === 'https:') {
+  window.addEventListener('load', () => { navigator.serviceWorker.register('sw.js').catch(() => {}); });
+}
+</script>
+</body>
+</html>
